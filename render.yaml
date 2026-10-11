@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: juris-backend
+    runtime: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: JURIS_ENV
+        value: production
+      - key: JURIS_DEBUG
+        value: "false"
+      - key: JURIS_AUTH_MODE
+        value: firebase
+      - key: JURIS_DEV_ALLOW_UNAUTHENTICATED
+        value: "false"
+      - key: JURIS_GATEWAY
+        value: gemini
+      - key: JURIS_GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: JURIS_MODEL_TIMEOUT
+        value: "30.0"
+      - key: JURIS_MAX_TOOL_ROUNDS
+        value: "5"
+      - key: JURIS_MONITORING_ENABLED
+        value: "true"
+      - key: JURIS_MONITOR_INTERVAL_MINUTES
+        value: "180"
+      # Sensitive variables: configure in Render Dashboard Environment/Secrets
+      - key: JURIS_GEMINI_API_KEY
+        sync: false
+      - key: JURIS_FIREBASE_PROJECT_ID
+        sync: false
+      # NOTE: JURIS does NOT hold an eCourts API key.
+      # The eCourts credential lives exclusively in the LED-side authorized service.
+      - key: JURIS_ALLOWED_ORIGINS_RAW
+        sync: false

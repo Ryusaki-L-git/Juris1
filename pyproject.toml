@@ -1,0 +1,27 @@
+[project]
+name = "juris"
+version = "0.4.0"
+description = "JURIS AI/backend layer for Lawyer's E-Diary"
+readme = "README.md"
+authors = [
+    { name = "Ryusaki L", email = "akeditprodesigns@gmail.com" }
+]
+requires-python = ">=3.12"
+
+dependencies = [
+    "cryptography>=50.0.1",
+    "fastapi>=0.141.1",
+    "google-cloud-firestore>=2.21.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.15.0",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
