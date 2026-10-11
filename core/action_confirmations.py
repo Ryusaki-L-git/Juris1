@@ -117,8 +117,8 @@ class ActionConfirmationStore:
 @lru_cache(maxsize=1)
 def get_action_confirmation_store() -> ActionConfirmationStore:
     if settings.firebase_project_id:
-        from google.cloud import firestore
-        return ActionConfirmationStore(firestore.Client(project=settings.firebase_project_id))
+        from core.firestore_client import get_firestore_client
+        return ActionConfirmationStore(get_firestore_client())
     if not settings.is_development:
         raise ConfigurationError("Persistent action confirmations require JURIS_FIREBASE_PROJECT_ID.")
     return ActionConfirmationStore()

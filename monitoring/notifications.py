@@ -77,8 +77,8 @@ async def dispatch_change_notification(
         return
 
     try:
-        from google.cloud import firestore  # type: ignore
-        client = firestore.Client(project=settings.firebase_project_id)
+        from core.firestore_client import get_firestore_client
+        client = get_firestore_client()
         doc_ref = (
             client
             .collection("_juris_notifications")

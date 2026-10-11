@@ -71,8 +71,8 @@ class FirestoreBYOKVault(CredentialResolver):
         if client is None:
             if not settings.firebase_project_id:
                 raise ConfigurationError("Firebase is required for persistent BYOK credentials.")
-            from google.cloud import firestore
-            client = firestore.Client(project=settings.firebase_project_id)
+            from core.firestore_client import get_firestore_client
+            client = get_firestore_client()
         self._client = client
 
     def _ref(self, user_id: str, provider: str):

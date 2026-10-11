@@ -76,12 +76,9 @@ class LedDataECourtsProvider(ECourtsProvider):
     def _get_client(self):
         if self._client is not None:
             return self._client
-        from google.cloud import firestore  # type: ignore
-        from core.config import settings
-        kwargs = {}
-        if settings.firebase_project_id:
-            kwargs["project"] = settings.firebase_project_id
-        return firestore.Client(**kwargs)
+        from core.firestore_client import get_firestore_client
+        self._client = get_firestore_client()
+        return self._client
 
     async def get_case_by_cnr(self, cnr: str) -> ECourtsSnapshot:
         """

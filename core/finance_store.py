@@ -33,7 +33,8 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         if client is None:
             if not settings.firebase_project_id:
                 raise ConfigurationError("JURIS Firebase project ID is not configured.")
-            client = firestore.Client(project=settings.firebase_project_id)
+            from core.firestore_client import get_firestore_client
+            client = get_firestore_client()
         self._client = client
 
     def get_entitlement(self, user_id: str) -> dict[str, Any] | None:

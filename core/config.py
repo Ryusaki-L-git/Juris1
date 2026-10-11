@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     # header will be assigned a development fallback user (is_verified=False).
     # If False or in staging/production, missing auth yields HTTP 401.
     firebase_project_id: str = ""
+    # Optional service-account JSON provided through a hosting secret.
+    # Leave blank when the hosting platform supplies Application Default Credentials.
+    firebase_service_account_json: str = ""
 
     # ── Case Token pricing (CENTRAL configuration point) ──────────────────────
     # The exact product prices for eCourts operations are NOT defined in the

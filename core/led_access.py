@@ -329,15 +329,15 @@ class FirestoreLedDataAccess:
     """
 
     def __init__(self, client: Any | None = None) -> None:
-        if client is None:
-            if not settings.firebase_project_id:
-                raise ConfigurationError(
-                    "JURIS Firebase project ID is not configured."
-                )
-            from google.cloud import firestore
+        # Defer cloud client creation until data access is requested.
+        self._client_instance = client
 
-            client = firestore.Client(project=settings.firebase_project_id)
-        self._client = client
+    @property
+    def _client(self):
+        if self._client_instance is None:
+            from core.firestore_client import get_firestore_client
+            self._client_instance = get_firestore_client()
+        return self._client_instance
 
     # ── internal helpers ────────────────────────────────────────────────────
 
