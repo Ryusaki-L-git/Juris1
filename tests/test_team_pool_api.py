@@ -36,7 +36,7 @@ def test_preferences_read_and_save_server_side(monkeypatch):
         assert before.json() == {"usageDeductionPriority": "personal_first", "preferredTeamId": "team-a"}
 
         saved = http.put(
-            _api("/billing/preferences"),
+            "/v1/billing/preferences",
             json={"usageDeductionPriority": "team_first", "preferredTeamId": "team-a"},
         )
         assert saved.status_code == 200
