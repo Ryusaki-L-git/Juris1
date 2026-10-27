@@ -124,8 +124,23 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         amount_minor_units: int,
         reason: str,
         reference_id: str,
+        *,
+        billing_source: str | None = None,
     ) -> TokenLedgerEntry:
         """Reserve Credits from the configured personal/team wallet priority."""
+        if billing_source is not None:
+            if billing_source == "personal":
+                return self._reserve_personal_credits(user_id, amount_minor_units, reason, reference_id)
+            if billing_source == "team":
+                profile_snapshot = self._client.collection("users").document(user_id).get()
+                profile = profile_snapshot.to_dict() if profile_snapshot.exists else {}
+                preferences = (profile or {}).get("billingPreferences")
+                preferences = preferences if isinstance(preferences, dict) else {}
+                team_id = preferences.get("preferredTeamId")
+                if not isinstance(team_id, str) or not team_id.strip():
+                    raise AuthorizationFailure("Choose an active team before using team Credits.")
+                return self._reserve_team_credits(user_id, team_id.strip(), amount_minor_units, reason, reference_id)
+            raise ValueError("billing_source must be personal or team.")
         profile_snapshot = self._client.collection("users").document(user_id).get()
         profile = profile_snapshot.to_dict() if profile_snapshot.exists else {}
         preferences = (profile or {}).get("billingPreferences")
