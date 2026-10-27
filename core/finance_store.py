@@ -389,6 +389,122 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
 
         return reserve_in_transaction(transaction)
 
+    def _settle_team_credits(
+        self,
+        user_id: str,
+        team_id: str,
+        reservation_reference: str,
+        actual_minor_units: int,
+    ) -> float:
+        clean_user, clean_team = user_id.strip(), team_id.strip()
+        clean_reference = reservation_reference.strip()
+        reservation_id = hashlib.sha256(
+            f"{TokenType.JURIS.value}:{clean_reference}".encode("utf-8")
+        ).hexdigest()
+        reservation_ref = self._team_ledger_collection(clean_team).document(reservation_id)
+        marker_ref = self._ai_reservation_marker_ref(clean_user, clean_reference)
+        settlement_id = hashlib.sha256(
+            f"{clean_user}:{clean_reference}:settlement".encode("utf-8")
+        ).hexdigest()
+        settlement_ref = self._client.collection("_server_ai_usage_settlements").document(settlement_id)
+        account_ref = self._team_balance_ref(clean_team, TokenType.JURIS)
+        member_ref = self._client.collection("teams").document(clean_team).collection("members").document(clean_user)
+        transaction = self._client.transaction(max_attempts=5)
+
+        @firestore.transactional
+        def settle_team_in_transaction(txn: firestore.Transaction) -> float:
+            prior_settlement = settlement_ref.get(transaction=txn)
+            marker_snapshot = marker_ref.get(transaction=txn)
+            reservation_snapshot = reservation_ref.get(transaction=txn)
+            account_snapshot = account_ref.get(transaction=txn)
+            member_snapshot = member_ref.get(transaction=txn)
+            if prior_settlement.exists:
+                prior_data = prior_settlement.to_dict() or {}
+                if prior_data.get("actualMinorUnits") != actual_minor_units:
+                    raise TokenOperationConflict()
+                return float(prior_data.get("balanceAfter", 0.0))
+            marker_data = marker_snapshot.to_dict() or {}
+            if (
+                not marker_snapshot.exists
+                or marker_data.get("userId") != clean_user
+                or marker_data.get("referenceId") != clean_reference
+                or marker_data.get("source") != "team"
+                or marker_data.get("teamId") != clean_team
+            ):
+                raise TokenOperationConflict()
+            if not reservation_snapshot.exists or not account_snapshot.exists or not member_snapshot.exists:
+                raise TokenOperationConflict()
+            reservation_data = reservation_snapshot.to_dict() or {}
+            if (
+                reservation_data.get("userId") != clean_user
+                or reservation_data.get("teamId") != clean_team
+                or reservation_data.get("tokenType") != TokenType.JURIS.value
+                or reservation_data.get("direction") != "debit"
+                or reservation_data.get("referenceId") != clean_reference
+            ):
+                raise TokenOperationConflict()
+            reserved_units = reservation_data.get("amountMinorUnits")
+            if isinstance(reserved_units, bool) or not isinstance(reserved_units, int) or reserved_units < 0:
+                reserved_units = round(float(reservation_data.get("amount", 0)) * 100)
+            if actual_minor_units > reserved_units:
+                raise TokenOperationConflict()
+            account_data = account_snapshot.to_dict() or {}
+            current_units = self._stored_balance_units(account_data, TokenType.JURIS)
+            delta = reserved_units - actual_minor_units
+            balance_after_units = current_units + delta
+            member = member_snapshot.to_dict() or {}
+            usage = member.get("billingUsage")
+            usage = usage if isinstance(usage, dict) else {}
+            limits = member.get("billingLimits")
+            limits = limits if isinstance(limits, dict) else {}
+            limit = limits.get("jurisCreditLimitMinorUnits", 0)
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+                raise ConfigurationError("Stored member JURIS Credit allocation is invalid.")
+            period = datetime.now(timezone.utc).strftime("%Y-%m")
+            same_period = marker_data.get("billingPeriod") == period and usage.get("period") == period
+            used = usage.get("jurisCreditUsedMinorUnits", 0) if same_period else 0
+            if isinstance(used, bool) or not isinstance(used, int) or used < 0:
+                raise ConfigurationError("Stored member JURIS Credit usage is invalid.")
+            used_after = max(0, used - delta) if same_period else 0
+            now = datetime.now(timezone.utc)
+            if delta:
+                txn.set(account_ref, self._account_balance_fields(balance_after_units, TokenType.JURIS, now), merge=True)
+                member_after = dict(member)
+                member_after["billingUsage"] = {
+                    **usage,
+                    "period": period,
+                    "caseTokenUsedMinorUnits": usage.get("caseTokenUsedMinorUnits", 0) if same_period else 0,
+                    "jurisCreditUsedMinorUnits": used_after,
+                    "updatedAt": now,
+                }
+                txn.set(member_ref, member_after, merge=True)
+            if actual_minor_units == 0:
+                txn.delete(reservation_ref)
+            else:
+                settled_data = dict(reservation_data)
+                settled_data.update({
+                    "amount": actual_minor_units / 100,
+                    "amountMinorUnits": actual_minor_units,
+                    "reason": "JURIS AI usage",
+                    "balanceAfter": balance_after_units / 100,
+                    "balanceAfterMinorUnits": balance_after_units,
+                    "settledAt": now,
+                })
+                txn.set(reservation_ref, settled_data, merge=True)
+            txn.create(settlement_ref, {
+                "userId": clean_user,
+                "teamId": clean_team,
+                "source": "team",
+                "reservationReference": clean_reference,
+                "reservedMinorUnits": reserved_units,
+                "actualMinorUnits": actual_minor_units,
+                "balanceAfter": balance_after_units / 100,
+                "createdAt": now,
+            })
+            return balance_after_units / 100
+
+        return settle_team_in_transaction(transaction)
+
     def settle_credits(
         self,
         user_id: str,
@@ -402,6 +518,15 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         clean_reference = reservation_reference.strip()
         if not clean_user or not clean_reference:
             raise ValueError("Credit settlement requires user and reservation reference.")
+        marker_snapshot = self._ai_reservation_marker_ref(clean_user, clean_reference).get()
+        marker_data = marker_snapshot.to_dict() if marker_snapshot.exists else {}
+        if marker_data.get("source") == "team":
+            team_id = marker_data.get("teamId")
+            if not isinstance(team_id, str) or not team_id.strip():
+                raise TokenOperationConflict()
+            return self._settle_team_credits(
+                clean_user, team_id, clean_reference, actual_minor_units
+            )
 
         reservation_id = hashlib.sha256(
             f"{TokenType.JURIS.value}:{clean_reference}".encode("utf-8")
