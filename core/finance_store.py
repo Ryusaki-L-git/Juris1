@@ -203,6 +203,13 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
 
         @firestore.transactional
         def settle_in_transaction(txn: firestore.Transaction) -> float:
+            prior_settlement = settlement_ref.get(transaction=txn)
+            if prior_settlement.exists:
+                prior_data = prior_settlement.to_dict() or {}
+                if prior_data.get("actualMinorUnits") != actual_minor_units:
+                    raise TokenOperationConflict()
+                return float(prior_data.get("balanceAfter", 0.0))
+
             reservation_snapshot = reservation_ref.get(transaction=txn)
             if not reservation_snapshot.exists:
                 raise TokenOperationConflict()
@@ -215,13 +222,6 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
                 or reservation.reference_id != clean_reference
             ):
                 raise TokenOperationConflict()
-
-            prior_settlement = settlement_ref.get(transaction=txn)
-            if prior_settlement.exists:
-                prior_data = prior_settlement.to_dict() or {}
-                if prior_data.get("actualMinorUnits") != actual_minor_units:
-                    raise TokenOperationConflict()
-                return float(prior_data.get("balanceAfter", 0.0))
 
             account_snapshot = account_ref.get(transaction=txn)
             account_data = account_snapshot.to_dict() or {}
@@ -236,31 +236,29 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
 
             created_at = datetime.now(timezone.utc)
             if delta:
-                adjustment_reference = f"{clean_reference}:settlement"
-                adjustment_id = hashlib.sha256(
-                    f"{TokenType.JURIS.value}:{adjustment_reference}".encode("utf-8")
-                ).hexdigest()
-                adjustment_ref = self._ledger_collection(clean_user).document(adjustment_id)
-                if adjustment_ref.get(transaction=txn).exists:
-                    raise TokenOperationConflict()
-                adjustment = TokenLedgerEntry(
-                    transaction_id=adjustment_id,
-                    user_id=clean_user,
-                    actor_user_id=clean_user,
-                    token_type=TokenType.JURIS,
-                    amount=abs(delta) / 100,
-                    direction="credit" if delta > 0 else "debit",
-                    reason="ai_usage_settlement_refund" if delta > 0 else "ai_usage_settlement_overage",
-                    reference_id=adjustment_reference,
-                    created_at=created_at,
-                    balance_after=balance_after_units / 100,
-                )
-                txn.create(adjustment_ref, self._ledger_document(adjustment))
                 txn.set(
                     account_ref,
                     self._account_balance_fields(balance_after_units, TokenType.JURIS, created_at),
                     merge=True,
                 )
+
+            if actual_minor_units == 0:
+                # Failed provider calls are fully released and do not appear as a charge.
+                txn.delete(reservation_ref)
+            else:
+                settled_entry = TokenLedgerEntry(
+                    transaction_id=reservation.transaction_id,
+                    user_id=clean_user,
+                    actor_user_id=clean_user,
+                    token_type=TokenType.JURIS,
+                    amount=actual_minor_units / 100,
+                    direction="debit",
+                    reason="JURIS AI usage",
+                    reference_id=clean_reference,
+                    created_at=reservation.created_at,
+                    balance_after=balance_after_units / 100,
+                )
+                txn.set(reservation_ref, self._ledger_document(settled_entry))
 
             txn.create(settlement_ref, {
                 "userId": clean_user,
