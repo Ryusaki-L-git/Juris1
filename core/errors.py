@@ -84,7 +84,7 @@ class SubscriptionNotEligible(JurisError):
 
 
 class InsufficientTokens(JurisError):
-    def __init__(self, required: int, available: int) -> None:
+    def __init__(self, required: int | float, available: int | float) -> None:
         super().__init__(
             ErrorCode.INSUFFICIENT_TOKENS,
             "The current token balance is insufficient for this operation.",
