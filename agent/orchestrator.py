@@ -29,10 +29,10 @@ from agent.context_resolver import ContextResolver
 from core.authorized_access import AuthorizedLedAccess
 from core.action_confirmations import get_action_confirmation_store
 from core.config import settings
-from core.ai_pricing import AIPriceConfigurationError, estimate_reservation_minor_units, price_usage
+from core.ai_pricing import estimate_reservation_minor_units, price_usage
 from core.credit_billing import CreditBillingService
 from core.finance_store import get_finance_repository
-from core.errors import ConfigurationError, InsufficientTokens
+from core.errors import InsufficientTokens
 from core.identity import RequestIdentity
 from core.led_access import LedDataAccess, get_led_data_access
 from core.permission_engine import LedPermissionEngine
@@ -280,7 +280,20 @@ class JurisOrchestrator:
                         session_id=request.session_id,
                     )
 
-            model_response: ModelResponse = await request_gateway.generate(model_request)
+            try:
+                model_response: ModelResponse = await request_gateway.generate(model_request)
+            except Exception as exc:
+                if reservation_reference is not None and self._credit_billing is not None:
+                    try:
+                        self._credit_billing.settle(identity, reservation_reference, 0)
+                    except Exception as settle_exc:
+                        logger.error("Failed to release Credits after provider exception (%s).", type(settle_exc).__name__)
+                logger.error("Model gateway raised an unexpected exception (%s).", type(exc).__name__)
+                return ChatResponse(
+                    reply="The AI provider failed unexpectedly. Any unused Credit reservation was released where possible; please try again later.",
+                    status=ResponseStatus.UNAVAILABLE,
+                    session_id=request.session_id,
+                )
 
             if reservation_reference is not None and self._credit_billing is not None:
                 usage = model_response.raw_metadata.get("usage")
