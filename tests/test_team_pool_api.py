@@ -6,6 +6,11 @@ import api.team_pools as team_pools
 from api.deps import get_request_identity
 from core.identity import JurisUser, RequestIdentity
 from main import app
+from core.config import settings
+
+_PREFIX = settings.api_prefix.rstrip('/')
+def _api(path: str) -> str:
+    return f"{_PREFIX}{path}"
 from tests.test_team_credit_pools import FakeClient, _seed
 
 
@@ -31,7 +36,7 @@ def test_preferences_read_and_save_server_side(monkeypatch):
     client = FakeClient(_seed(priority="personal_first"))
     http = _client(monkeypatch, client)
     try:
-        before = http.get("/v1/billing/preferences")
+        before = http.get(_api("/billing/preferences"))
         assert before.status_code == 200
         assert before.json() == {"usageDeductionPriority": "personal_first", "preferredTeamId": "team-a"}
 
@@ -63,7 +68,7 @@ def test_team_pool_keeps_personal_and_shared_balances_separate(monkeypatch):
     client = FakeClient(_seed())
     http = _client(monkeypatch, client)
     try:
-        response = http.get("/v1/teams/team-a/pool")
+        response = http.get(_api("/teams/team-a/pool"))
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["personal"]["jurisCreditsMinorUnits"] == 500
@@ -80,7 +85,7 @@ def test_non_manager_cannot_change_member_allocations(monkeypatch):
     http = _client(monkeypatch, client)
     try:
         response = http.put(
-            "/v1/teams/team-a/pool/members/uid-a",
+            _api("/teams/team-a/pool/members/uid-a"),
             json={
                 "caseTokenLimitMinorUnits": 5000,
                 "jurisCreditLimitMinorUnits": 2500,
