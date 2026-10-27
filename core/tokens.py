@@ -19,10 +19,10 @@ class TokenType(str, Enum):
 class TokenBalance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    juris_tokens: int = 0
+    juris_tokens: float = 0.0
     case_tokens: float = 0.0
 
-    def for_type(self, token_type: TokenType) -> int | float:
+    def for_type(self, token_type: TokenType) -> float:
         return self.juris_tokens if token_type is TokenType.JURIS else self.case_tokens
 
 
@@ -115,7 +115,7 @@ class TokenService:
 
     def get_balances(self, identity: RequestIdentity) -> TokenBalance:
         return TokenBalance(
-            juris_tokens=int(self.get_balance(identity, TokenType.JURIS)),
+            juris_tokens=float(self.get_balance(identity, TokenType.JURIS)),
             case_tokens=float(self.get_balance(identity, TokenType.CASE)),
         )
 
