@@ -65,18 +65,27 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
                 raise ConfigurationError("Stored case-token balance is invalid.")
             return legacy * 100
 
+        # Existing JURIS balances are whole Credits. New balances use canonical
+        # hundredths so usage charges can be as small as 0.01 Credit.
+        if "balanceMinorUnits" in data:
+            value = data.get("balanceMinorUnits")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ConfigurationError("Stored JURIS Credit balance is invalid.")
+            return value
         balance = data.get("balance", 0)
         if isinstance(balance, bool) or not isinstance(balance, int) or balance < 0:
-            raise ConfigurationError("Stored JURIS-token balance is invalid.")
-        return balance
+            raise ConfigurationError("Stored JURIS Credit balance is invalid.")
+        return balance * 100
 
     @staticmethod
-    def _balance_in_tokens(stored_units: int, token_type: TokenType) -> int | float:
-        return stored_units / 100 if token_type is TokenType.CASE else stored_units
+    def _balance_in_tokens(stored_units: int, token_type: TokenType) -> float:
+        # Both currencies use hundredths internally; legacy whole-unit balances
+        # are normalized by _stored_balance_units before this conversion.
+        return stored_units / 100
 
     @staticmethod
     def _amount_in_storage_units(amount: int, token_type: TokenType) -> int:
-        return amount * 100 if token_type is TokenType.CASE else amount
+        return amount * 100
 
     @staticmethod
     def _account_balance_fields(
@@ -92,7 +101,9 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
             }
         return {
             "tokenType": token_type.value,
-            "balance": balance_units,
+            "balance": balance_units / 100,
+            "balanceMinorUnits": balance_units,
+            "balanceUnit": "hundredths",
             "updatedAt": updated_at,
         }
 
@@ -286,9 +297,8 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
             "createdAt": entry.created_at,
             "balanceAfter": entry.balance_after,
         }
-        if entry.token_type is TokenType.CASE:
-            document["amountMinorUnits"] = round(entry.amount * 100)
-            document["balanceAfterMinorUnits"] = round(entry.balance_after * 100)
+        document["amountMinorUnits"] = round(entry.amount * 100)
+        document["balanceAfterMinorUnits"] = round(entry.balance_after * 100)
         return document
 
     @staticmethod
@@ -298,12 +308,12 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         balance_minor = data.get("balanceAfterMinorUnits")
         amount = (
             amount_minor / 100
-            if token_type is TokenType.CASE and isinstance(amount_minor, int)
+            if isinstance(amount_minor, int) and not isinstance(amount_minor, bool)
             else data["amount"]
         )
         balance_after = (
             balance_minor / 100
-            if token_type is TokenType.CASE and isinstance(balance_minor, int)
+            if isinstance(balance_minor, int) and not isinstance(balance_minor, bool)
             else data["balanceAfter"]
         )
         return TokenLedgerEntry(
