@@ -353,6 +353,7 @@ class JurisOrchestrator:
                         identity,
                         reserved_minor_units,
                         reference_id=reservation_reference,
+                        billing_source=request.billing_source,
                     )
                 except BillingSourceChoiceRequired:
                     return ChatResponse(
