@@ -461,11 +461,15 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
                 raise ConfigurationError("Stored member JURIS Credit allocation is invalid.")
             period = datetime.now(timezone.utc).strftime("%Y-%m")
-            same_period = marker_data.get("billingPeriod") == period and usage.get("period") == period
-            used = usage.get("jurisCreditUsedMinorUnits", 0) if same_period else 0
+            usage_is_current = usage.get("period") == period
+            same_period = marker_data.get("billingPeriod") == period and usage_is_current
+            used = usage.get("jurisCreditUsedMinorUnits", 0) if usage_is_current else 0
+            case_used = usage.get("caseTokenUsedMinorUnits", 0) if usage_is_current else 0
             if isinstance(used, bool) or not isinstance(used, int) or used < 0:
                 raise ConfigurationError("Stored member JURIS Credit usage is invalid.")
-            used_after = max(0, used - delta) if same_period else 0
+            if isinstance(case_used, bool) or not isinstance(case_used, int) or case_used < 0:
+                raise ConfigurationError("Stored member Case Token usage is invalid.")
+            used_after = max(0, used - delta) if same_period else used
             now = datetime.now(timezone.utc)
             if delta:
                 txn.set(account_ref, self._account_balance_fields(balance_after_units, TokenType.JURIS, now), merge=True)
@@ -473,7 +477,7 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
                 member_after["billingUsage"] = {
                     **usage,
                     "period": period,
-                    "caseTokenUsedMinorUnits": usage.get("caseTokenUsedMinorUnits", 0) if same_period else 0,
+                    "caseTokenUsedMinorUnits": case_used,
                     "jurisCreditUsedMinorUnits": used_after,
                     "updatedAt": now,
                 }
