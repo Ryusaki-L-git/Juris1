@@ -85,9 +85,22 @@ def rates_for_model(model: str, *, on_date: date | None = None) -> ModelRates:
     clean_model = (model or "").strip()
     rates = _configured_rates()
     if clean_model in rates:
-        if clean_model == "gemini-3.8-flash" and not settings.ai_model_pricing_json.strip():
-            if (on_date or date.today()) >= date(2027, 1, 1):
-                return _GEMINI_38_FLASH_2027
+        raw_overrides = settings.ai_model_pricing_json.strip()
+        overridden_models: set[str] = set()
+        if raw_overrides:
+            try:
+                parsed_overrides = json.loads(raw_overrides)
+                if isinstance(parsed_overrides, dict):
+                    overridden_models = {str(key).strip() for key in parsed_overrides}
+            except json.JSONDecodeError:
+                # _configured_rates reports the configuration error below.
+                overridden_models = set()
+        if (
+            clean_model == "gemini-3.8-flash"
+            and clean_model not in overridden_models
+            and (on_date or date.today()) >= date(2027, 1, 1)
+        ):
+            return _GEMINI_38_FLASH_2027
         return rates[clean_model]
     raise AIPriceConfigurationError(
         f"No JURIS Credits price is configured for Gemini model '{clean_model}'."
