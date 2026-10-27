@@ -26,6 +26,17 @@ from core.tokens import (
 )
 
 
+class BillingSourceChoiceRequired(Exception):
+    """Raised when a user's explicit ask-before-charge preference needs UI input."""
+
+
+class TeamCreditAllocationInsufficient(Exception):
+    def __init__(self, required: float, available: float) -> None:
+        super().__init__("The member's team JURIS Credit allocation is insufficient.")
+        self.required = required
+        self.available = available
+
+
 class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
     """Admin-SDK repository for server-owned entitlements, balances and ledger."""
 
@@ -108,6 +119,193 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         }
 
     def reserve_credits(
+        self,
+        user_id: str,
+        amount_minor_units: int,
+        reason: str,
+        reference_id: str,
+    ) -> TokenLedgerEntry:
+        """Reserve Credits from the configured personal/team wallet priority."""
+        profile_snapshot = self._client.collection("users").document(user_id).get()
+        profile = profile_snapshot.to_dict() if profile_snapshot.exists else {}
+        preferences = (profile or {}).get("billingPreferences")
+        preferences = preferences if isinstance(preferences, dict) else {}
+        priority = preferences.get("usageDeductionPriority", "personal_first")
+        team_id = preferences.get("preferredTeamId")
+        if not isinstance(team_id, str) or not team_id.strip():
+            team_id = None
+        else:
+            team_id = team_id.strip()
+        if priority not in {"personal_first", "team_first", "ask"}:
+            priority = "personal_first"
+        if priority == "ask" and team_id:
+            raise BillingSourceChoiceRequired(
+                "Choose personal or team Credits before continuing."
+            )
+        if not team_id:
+            return self._reserve_personal_credits(
+                user_id, amount_minor_units, reason, reference_id
+            )
+        if priority == "team_first":
+            try:
+                return self._reserve_team_credits(
+                    user_id, team_id, amount_minor_units, reason, reference_id
+                )
+            except (InsufficientTokens, TeamCreditAllocationInsufficient):
+                return self._reserve_personal_credits(
+                    user_id, amount_minor_units, reason, reference_id
+                )
+        try:
+            return self._reserve_personal_credits(
+                user_id, amount_minor_units, reason, reference_id
+            )
+        except InsufficientTokens as personal_error:
+            try:
+                return self._reserve_team_credits(
+                    user_id, team_id, amount_minor_units, reason, reference_id
+                )
+            except (InsufficientTokens, TeamCreditAllocationInsufficient):
+                raise personal_error
+
+    def _reserve_team_credits(
+        self,
+        user_id: str,
+        team_id: str,
+        amount_minor_units: int,
+        reason: str,
+        reference_id: str,
+    ) -> TokenLedgerEntry:
+        if isinstance(amount_minor_units, bool) or not isinstance(amount_minor_units, int) or amount_minor_units < 1:
+            raise ValueError("Credit reservation must be at least 0.01 Credit.")
+        clean_user, clean_team = user_id.strip(), team_id.strip()
+        clean_reason, clean_reference = reason.strip(), reference_id.strip()
+        if not clean_user or not clean_team or "/" in clean_team or not clean_reason or not clean_reference:
+            raise ValueError("Team Credit reservation requires valid user, team, reason, and reference.")
+        transaction_id = hashlib.sha256(
+            f"{TokenType.JURIS.value}:{clean_reference}".encode("utf-8")
+        ).hexdigest()
+        team_ref = self._client.collection("teams").document(clean_team)
+        member_ref = team_ref.collection("members").document(clean_user)
+        account_ref = self._team_balance_ref(clean_team, TokenType.JURIS)
+        ledger_ref = self._team_ledger_collection(clean_team).document(transaction_id)
+        marker_ref = self._ai_reservation_marker_ref(clean_user, clean_reference)
+        period = datetime.now(timezone.utc).strftime("%Y-%m")
+        transaction = self._client.transaction(max_attempts=5)
+
+        @firestore.transactional
+        def reserve_team_in_transaction(txn: firestore.Transaction) -> TokenLedgerEntry:
+            prior_snapshot = ledger_ref.get(transaction=txn)
+            team_snapshot = team_ref.get(transaction=txn)
+            member_snapshot = member_ref.get(transaction=txn)
+            account_snapshot = account_ref.get(transaction=txn)
+            marker_snapshot = marker_ref.get(transaction=txn)
+            if prior_snapshot.exists:
+                prior_data = prior_snapshot.to_dict() or {}
+                if (
+                    prior_data.get("userId") != clean_user
+                    or prior_data.get("teamId") != clean_team
+                    or prior_data.get("tokenType") != TokenType.JURIS.value
+                    or prior_data.get("direction") != "debit"
+                    or prior_data.get("amountMinorUnits") != amount_minor_units
+                    or prior_data.get("reason") != clean_reason
+                    or prior_data.get("referenceId") != clean_reference
+                ):
+                    raise TokenOperationConflict()
+                return self._ledger_entry(prior_data)
+
+            team = team_snapshot.to_dict() or {}
+            member = member_snapshot.to_dict() or {}
+            if not team_snapshot.exists or team.get("isActive") is False:
+                raise AuthorizationFailure("Active team not found.")
+            if (
+                not member_snapshot.exists
+                or member.get("isActive") is not True
+                or member.get("identityType") != "firebase_uid"
+                or member.get("userId") != clean_user
+            ):
+                raise AuthorizationFailure("An active LED team membership is required.")
+
+            limits = member.get("billingLimits")
+            limits = limits if isinstance(limits, dict) else {}
+            limit = limits.get("jurisCreditLimitMinorUnits", 0)
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+                raise ConfigurationError("Stored member JURIS Credit allocation is invalid.")
+            usage = member.get("billingUsage")
+            usage = usage if isinstance(usage, dict) else {}
+            used = usage.get("jurisCreditUsedMinorUnits", 0) if usage.get("period") == period else 0
+            if isinstance(used, bool) or not isinstance(used, int) or used < 0:
+                raise ConfigurationError("Stored member JURIS Credit usage is invalid.")
+            member_available = max(0, limit - used)
+            if member_available < amount_minor_units:
+                raise TeamCreditAllocationInsufficient(amount_minor_units / 100, member_available / 100)
+
+            account_data = account_snapshot.to_dict() or {}
+            available_units = self._stored_balance_units(account_data, TokenType.JURIS)
+            if amount_minor_units > available_units:
+                raise InsufficientTokens(amount_minor_units / 100, available_units / 100)
+            if marker_snapshot.exists:
+                marker_data = marker_snapshot.to_dict() or {}
+                if marker_data.get("userId") != clean_user or marker_data.get("referenceId") != clean_reference:
+                    raise TokenOperationConflict()
+                if marker_data.get("source") != "team" or marker_data.get("teamId") != clean_team:
+                    raise TokenOperationConflict()
+
+            balance_after_units = available_units - amount_minor_units
+            created_at = datetime.now(timezone.utc)
+            entry = TokenLedgerEntry(
+                transaction_id=transaction_id,
+                user_id=clean_user,
+                actor_user_id=clean_user,
+                token_type=TokenType.JURIS,
+                amount=amount_minor_units / 100,
+                direction="debit",
+                reason=clean_reason,
+                reference_id=clean_reference,
+                created_at=created_at,
+                balance_after=balance_after_units / 100,
+            )
+            member_after = dict(member)
+            member_after["billingUsage"] = {
+                **usage,
+                "period": period,
+                "caseTokenUsedMinorUnits": usage.get("caseTokenUsedMinorUnits", 0) if usage.get("period") == period else 0,
+                "jurisCreditUsedMinorUnits": used + amount_minor_units,
+                "updatedAt": created_at,
+            }
+            txn.set(account_ref, self._account_balance_fields(balance_after_units, TokenType.JURIS, created_at), merge=True)
+            txn.set(member_ref, member_after, merge=True)
+            txn.create(ledger_ref, {
+                **self._ledger_document(entry),
+                "teamId": clean_team,
+                "billingPeriod": period,
+            })
+            txn.set(marker_ref, {
+                "userId": clean_user,
+                "teamId": clean_team,
+                "source": "team",
+                "referenceId": clean_reference,
+                "amountMinorUnits": amount_minor_units,
+                "billingPeriod": period,
+                "createdAt": created_at,
+            })
+            return entry
+
+        return reserve_team_in_transaction(transaction)
+
+    def _team_balance_ref(self, team_id: str, token_type: TokenType):
+        return (
+            self._client.collection("_server_team_token_accounts")
+            .document(team_id).collection("balances").document(token_type.value)
+        )
+
+    def _team_ledger_collection(self, team_id: str):
+        return self._client.collection("_server_team_token_accounts").document(team_id).collection("ledger")
+
+    def _ai_reservation_marker_ref(self, user_id: str, reference_id: str):
+        key = hashlib.sha256(f"{user_id}:{reference_id}".encode("utf-8")).hexdigest()
+        return self._client.collection("_server_ai_usage_reservations").document(key)
+
+    def _reserve_personal_credits(
         self,
         user_id: str,
         amount_minor_units: int,
