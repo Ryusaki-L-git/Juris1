@@ -16,7 +16,7 @@ from api.deps import get_request_identity
 from core.firestore_client import get_firestore_client
 from core.identity import RequestIdentity
 
-router = APIRouter(tags=["team-pools"])
+router = APIRouter(prefix="/v1", tags=["team-pools"])
 _PRIORITIES = {"personal_first", "team_first", "ask"}
 
 
