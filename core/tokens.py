@@ -20,9 +20,9 @@ class TokenBalance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     juris_tokens: int = 0
-    case_tokens: int = 0
+    case_tokens: float = 0.0
 
-    def for_type(self, token_type: TokenType) -> int:
+    def for_type(self, token_type: TokenType) -> int | float:
         return self.juris_tokens if token_type is TokenType.JURIS else self.case_tokens
 
 
@@ -33,12 +33,12 @@ class TokenLedgerEntry(BaseModel):
     user_id: str
     actor_user_id: str
     token_type: TokenType
-    amount: int
+    amount: float
     direction: str
     reason: str
     reference_id: str
     created_at: datetime
-    balance_after: int
+    balance_after: float
 
 
 class TokenMutationResult(BaseModel):
@@ -49,7 +49,7 @@ class TokenMutationResult(BaseModel):
 
 
 class TokenRepository(Protocol):
-    def get_balance(self, user_id: str, token_type: TokenType) -> int: ...
+    def get_balance(self, user_id: str, token_type: TokenType) -> int | float: ...
 
     def consume_tokens(
         self,
@@ -79,7 +79,12 @@ class TokenRepository(Protocol):
 
 
 class TokenService:
-    """Authenticated token reads and atomic debits for trusted backend workflows."""
+    """Authenticated token reads and atomic whole-token debits/grants.
+
+    Case-token balances are exposed in token units. The Firestore repository
+    stores case balances in hundredths so trusted backend workflows can debit
+    fractional prices such as Smart Refresh's 0.5 token.
+    """
 
     def __init__(self, repository: TokenRepository) -> None:
         self._repository = repository
@@ -100,7 +105,7 @@ class TokenService:
 
     def get_balance(
         self, identity: RequestIdentity, token_type: TokenType | str
-    ) -> int:
+    ) -> int | float:
         user = require_verified_user(identity)
         kind = self._validate_token_type(token_type)
         balance = self._repository.get_balance(user.user_id, kind)
@@ -110,8 +115,8 @@ class TokenService:
 
     def get_balances(self, identity: RequestIdentity) -> TokenBalance:
         return TokenBalance(
-            juris_tokens=self.get_balance(identity, TokenType.JURIS),
-            case_tokens=self.get_balance(identity, TokenType.CASE),
+            juris_tokens=int(self.get_balance(identity, TokenType.JURIS)),
+            case_tokens=float(self.get_balance(identity, TokenType.CASE)),
         )
 
     def require_tokens(
@@ -119,7 +124,7 @@ class TokenService:
         identity: RequestIdentity,
         token_type: TokenType | str,
         required_tokens: int,
-    ) -> int:
+    ) -> int | float:
         self._validate_amount(required_tokens, allow_zero=True)
         available = self.get_balance(identity, token_type)
         if required_tokens > available:
