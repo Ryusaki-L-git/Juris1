@@ -243,6 +243,7 @@ class JurisOrchestrator:
             bill_managed_gemini = (
                 settings.ai_usage_billing_enabled
                 and request_gateway.provider_name == "gemini"
+                and bool(getattr(request_gateway, "is_key_configured", True))
                 and str(mode_value or "managed").lower() != "byok"
             )
             reservation_reference: str | None = None
