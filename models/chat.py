@@ -62,6 +62,7 @@ class ResponseStatus(str):
     UNAUTHENTICATED = "unauthenticated"
     UNAVAILABLE = "unavailable"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    BILLING_SOURCE_REQUIRED = "billing_source_required"
 
 
 class ChatResponse(BaseModel):
