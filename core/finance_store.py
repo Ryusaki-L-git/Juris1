@@ -41,15 +41,60 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         snapshot = self._client.collection("_server_entitlements").document(user_id).get()
         return snapshot.to_dict() if snapshot.exists else None
 
-    def get_balance(self, user_id: str, token_type: TokenType) -> int:
+    def get_balance(self, user_id: str, token_type: TokenType) -> int | float:
         snapshot = self._balance_ref(user_id, token_type).get()
         if not snapshot.exists:
             return 0
         data = snapshot.to_dict() or {}
+        units = self._stored_balance_units(data, token_type)
+        return self._balance_in_tokens(units, token_type)
+
+    @staticmethod
+    def _stored_balance_units(data: dict[str, Any], token_type: TokenType) -> int:
+        if token_type is TokenType.CASE:
+            # Legacy accounts store whole tokens in `balance`. Once a case
+            # account has been written by the fractional-token system, the
+            # canonical integer balance is `balanceMinorUnits` (100ths).
+            if "balanceMinorUnits" in data:
+                value = data.get("balanceMinorUnits")
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ConfigurationError("Stored case-token balance is invalid.")
+                return value
+            legacy = data.get("balance", 0)
+            if isinstance(legacy, bool) or not isinstance(legacy, int) or legacy < 0:
+                raise ConfigurationError("Stored case-token balance is invalid.")
+            return legacy * 100
+
         balance = data.get("balance", 0)
         if isinstance(balance, bool) or not isinstance(balance, int) or balance < 0:
-            raise ConfigurationError("Stored token balance is invalid.")
+            raise ConfigurationError("Stored JURIS-token balance is invalid.")
         return balance
+
+    @staticmethod
+    def _balance_in_tokens(stored_units: int, token_type: TokenType) -> int | float:
+        return stored_units / 100 if token_type is TokenType.CASE else stored_units
+
+    @staticmethod
+    def _amount_in_storage_units(amount: int, token_type: TokenType) -> int:
+        return amount * 100 if token_type is TokenType.CASE else amount
+
+    @staticmethod
+    def _account_balance_fields(
+        balance_units: int, token_type: TokenType, updated_at: datetime
+    ) -> dict[str, Any]:
+        if token_type is TokenType.CASE:
+            return {
+                "tokenType": token_type.value,
+                "balance": balance_units / 100,
+                "balanceMinorUnits": balance_units,
+                "balanceUnit": "hundredths",
+                "updatedAt": updated_at,
+            }
+        return {
+            "tokenType": token_type.value,
+            "balance": balance_units,
+            "updatedAt": updated_at,
+        }
 
     def consume_tokens(
         self,
@@ -64,6 +109,7 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         ).hexdigest()
         account_ref = self._balance_ref(user_id, token_type)
         ledger_ref = self._ledger_collection(user_id).document(transaction_id)
+        amount_units = self._amount_in_storage_units(amount, token_type)
         transaction = self._client.transaction(max_attempts=5)
 
         @firestore.transactional
@@ -85,37 +131,29 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
 
             account_snapshot = account_ref.get(transaction=txn)
             account_data = account_snapshot.to_dict() or {}
-            available = account_data.get("balance", 0)
-            if (
-                isinstance(available, bool)
-                or not isinstance(available, int)
-                or available < 0
-            ):
-                raise ConfigurationError("Stored token balance is invalid.")
-            if amount > available:
-                raise InsufficientTokens(amount, available)
+            available_units = self._stored_balance_units(account_data, token_type)
+            available_tokens = self._balance_in_tokens(available_units, token_type)
+            if amount_units > available_units:
+                raise InsufficientTokens(amount, available_tokens)
 
-            balance_after = available - amount
+            balance_after_units = available_units - amount_units
+            balance_after = self._balance_in_tokens(balance_after_units, token_type)
             created_at = datetime.now(timezone.utc)
             entry = TokenLedgerEntry(
                 transaction_id=transaction_id,
                 user_id=user_id,
                 actor_user_id=user_id,
                 token_type=token_type,
-                amount=amount,
+                amount=float(amount),
                 direction="debit",
                 reason=reason,
                 reference_id=reference_id,
                 created_at=created_at,
-                balance_after=balance_after,
+                balance_after=float(balance_after),
             )
             txn.set(
                 account_ref,
-                {
-                    "tokenType": token_type.value,
-                    "balance": balance_after,
-                    "updatedAt": created_at,
-                },
+                self._account_balance_fields(balance_after_units, token_type, created_at),
                 merge=True,
             )
             txn.create(ledger_ref, self._ledger_document(entry))
@@ -140,6 +178,7 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         )
         account_ref = self._balance_ref(target_user_id, token_type)
         ledger_ref = self._ledger_collection(target_user_id).document(transaction_id)
+        amount_units = self._amount_in_storage_units(amount, token_type)
         transaction = self._client.transaction(max_attempts=5)
 
         @firestore.transactional
@@ -167,35 +206,25 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
 
             account_snapshot = account_ref.get(transaction=txn)
             account_data = account_snapshot.to_dict() or {}
-            balance = account_data.get("balance", 0)
-            if (
-                isinstance(balance, bool)
-                or not isinstance(balance, int)
-                or balance < 0
-            ):
-                raise ConfigurationError("Stored token balance is invalid.")
-
-            balance_after = balance + amount
+            current_units = self._stored_balance_units(account_data, token_type)
+            balance_after_units = current_units + amount_units
+            balance_after = self._balance_in_tokens(balance_after_units, token_type)
             created_at = datetime.now(timezone.utc)
             entry = TokenLedgerEntry(
                 transaction_id=transaction_id,
                 user_id=target_user_id,
                 actor_user_id=actor_user_id,
                 token_type=token_type,
-                amount=amount,
+                amount=float(amount),
                 direction="credit",
                 reason=reason,
                 reference_id=reference_id,
                 created_at=created_at,
-                balance_after=balance_after,
+                balance_after=float(balance_after),
             )
             txn.set(
                 account_ref,
-                {
-                    "tokenType": token_type.value,
-                    "balance": balance_after,
-                    "updatedAt": created_at,
-                },
+                self._account_balance_fields(balance_after_units, token_type, created_at),
                 merge=True,
             )
             txn.create(ledger_ref, self._ledger_document(entry))
@@ -245,7 +274,7 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
 
     @staticmethod
     def _ledger_document(entry: TokenLedgerEntry) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "transactionId": entry.transaction_id,
             "userId": entry.user_id,
             "actorUserId": entry.actor_user_id,
@@ -257,22 +286,38 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
             "createdAt": entry.created_at,
             "balanceAfter": entry.balance_after,
         }
+        if entry.token_type is TokenType.CASE:
+            document["amountMinorUnits"] = round(entry.amount * 100)
+            document["balanceAfterMinorUnits"] = round(entry.balance_after * 100)
+        return document
 
     @staticmethod
     def _ledger_entry(data: dict[str, Any]) -> TokenLedgerEntry:
+        token_type = TokenType(data["tokenType"])
+        amount_minor = data.get("amountMinorUnits")
+        balance_minor = data.get("balanceAfterMinorUnits")
+        amount = (
+            amount_minor / 100
+            if token_type is TokenType.CASE and isinstance(amount_minor, int)
+            else data["amount"]
+        )
+        balance_after = (
+            balance_minor / 100
+            if token_type is TokenType.CASE and isinstance(balance_minor, int)
+            else data["balanceAfter"]
+        )
         return TokenLedgerEntry(
             transaction_id=data["transactionId"],
             user_id=data["userId"],
             actor_user_id=data.get("actorUserId", data["userId"]),
-            token_type=TokenType(data["tokenType"]),
-            amount=data["amount"],
+            token_type=token_type,
+            amount=float(amount),
             direction=data["direction"],
             reason=data["reason"],
             reference_id=data["referenceId"],
             created_at=data["createdAt"],
-            balance_after=data["balanceAfter"],
+            balance_after=float(balance_after),
         )
-
 
 @lru_cache(maxsize=1)
 def get_finance_repository() -> FirestoreFinanceRepository:
