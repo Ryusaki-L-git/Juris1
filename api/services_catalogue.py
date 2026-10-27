@@ -15,7 +15,7 @@ from api.deps import get_request_identity
 from core.authorization import require_verified_user
 from core.identity import RequestIdentity
 
-router = APIRouter(tags=["services"])
+router = APIRouter(prefix="/v1", tags=["services"])
 
 
 class ServiceCatalogueItem(BaseModel):
