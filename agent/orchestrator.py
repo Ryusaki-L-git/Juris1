@@ -222,6 +222,15 @@ class JurisOrchestrator:
         clarification_requested = False
         suggested_action = None
         request_billing_id = identity.request_id.strip() or uuid.uuid4().hex
+        # Bind approval to the exact message, supplied context, and pending write
+        # confirmations so a quote cannot be reused with a modified request.
+        quote_binding_message = (
+            request.message
+            + "\\0"
+            + request.context.model_dump_json()
+            + "\\0"
+            + "\\0".join(sorted(request.confirmed_action_ids))
+        )
         approved_budget_minor_units: int | None = None
         spent_minor_units = 0
 
@@ -270,7 +279,7 @@ class JurisOrchestrator:
                             quote_token = await quote_store.issue(
                                 identity.user.user_id,
                                 request.session_id,
-                                request.message,
+                                quote_binding_message,
                                 billed_model_name,
                                 max_budget,
                             )
@@ -300,7 +309,7 @@ class JurisOrchestrator:
                             request.billing_confirmation_token,
                             identity.user.user_id,
                             request.session_id,
-                            request.message,
+                            quote_binding_message,
                             billed_model_name,
                         )
                         if approved_budget_minor_units is None:
