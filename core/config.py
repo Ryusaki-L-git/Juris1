@@ -114,6 +114,16 @@ class Settings(BaseSettings):
     # Leave blank when the hosting platform supplies Application Default Credentials.
     firebase_service_account_json: str = ""
 
+    # ── JURIS AI Credits pricing (separate from eCourts Case Tokens) ───────────
+    # Provider rates are in USD per million tokens. The pricing module supplies
+    # the reviewed defaults; deployments may override the rate table as JSON.
+    ai_usage_billing_enabled: bool = True
+    ai_usd_to_inr_rate: float = 95.0
+    ai_gross_margin_percent: float = 40.0
+    ai_max_output_tokens: int = 2048
+    ai_reservation_buffer: float = 1.25
+    ai_model_pricing_json: str = ""
+
     # ── Case Token pricing (CENTRAL configuration point) ──────────────────────
     # The exact product prices for eCourts operations are NOT defined in the
     # repository or specification.  These values are the single place token
