@@ -251,6 +251,7 @@ class JurisOrchestrator:
             )
             reservation_reference: str | None = None
             reserved_minor_units = 0
+            budget_overrun = False
             billed_model_name = (
                 str(getattr(request_gateway, "model_name", "") or "")
                 or str(getattr(request.ai, "model", "") or "")
