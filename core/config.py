@@ -12,6 +12,7 @@ Usage anywhere in the application:
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -120,7 +121,7 @@ class Settings(BaseSettings):
     ai_usage_billing_enabled: bool = True
     ai_usd_to_inr_rate: float = 95.0
     ai_gross_margin_percent: float = 40.0
-    ai_max_output_tokens: int = 2048
+    ai_max_output_tokens: int = Field(default=2048, ge=1, le=8192)
     ai_reservation_buffer: float = 1.25
     ai_model_pricing_json: str = ""
 
