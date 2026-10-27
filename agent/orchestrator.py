@@ -335,7 +335,11 @@ class JurisOrchestrator:
                         billed_model_name,
                         len(model_request.model_dump_json()),
                     )
-                    reserved_minor_units = min(per_call_estimate, remaining_budget)
+                    # Reserve the full remaining user-approved budget for this
+                    # provider call. Settlement refunds the unused portion, so
+                    # a real usage charge may exceed the per-call estimate while
+                    # still remaining inside the explicitly approved total cap.
+                    reserved_minor_units = remaining_budget
                     self._credit_billing.reserve(
                         identity,
                         reserved_minor_units,
@@ -384,9 +388,9 @@ class JurisOrchestrator:
                     elif model_response.finish_reason == "error":
                         actual_minor_units = 0
                     else:
-                        # If the provider omits usage metadata, charge the full
-                        # conservative reservation rather than silently underbill.
-                        actual_minor_units = reserved_minor_units
+                        # If provider usage is unavailable, charge the conservative
+                        # per-call estimate, not the entire multi-round budget hold.
+                        actual_minor_units = min(per_call_estimate, reserved_minor_units)
                     # Never charge more than the user-approved remaining budget.
                     budget_overrun = actual_minor_units > reserved_minor_units
                     actual_minor_units = min(actual_minor_units, reserved_minor_units)
