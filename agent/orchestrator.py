@@ -434,10 +434,10 @@ class JurisOrchestrator:
 
             # If no tool calls requested, we have the final model response
             if not model_response.tool_calls:
-                if bill_managed_gemini and 'budget_overrun' in locals() and budget_overrun:
-                    model_response.text = (
-                        model_response.text
-                        + "\n\nThe approved Credit limit was reached. No additional AI calls were made."
+                final_reply = model_response.text
+                if bill_managed_gemini and budget_overrun:
+                    final_reply += (
+                        "\n\nThe approved Credit limit was reached. No additional AI calls were made."
                     )
                 debug_payload = None
                 if settings.debug:
@@ -456,7 +456,7 @@ class JurisOrchestrator:
                 )
 
                 return ChatResponse(
-                    reply=model_response.text,
+                    reply=final_reply,
                     status=status_code,
                     session_id=request.session_id,
                     suggested_action=suggested_action,
