@@ -31,8 +31,9 @@ class ServiceCatalogueItem(BaseModel):
 
 # Prices are the approved customer-facing token prices currently present in the
 # project context. Unknown prices deliberately remain null rather than guessed.
-# Smart Refresh is the existing LED-owned gateway action; the other provider
-# operations remain unavailable until their authenticated handlers are wired.
+# Smart Refresh and the seven priced provider operations have authenticated LED
+# gateway handlers. Legal Check remains disabled until its AI execution path is
+# verified; unknown-price services remain unavailable rather than being guessed.
 _CATALOGUE = (
     ServiceCatalogueItem(
         serviceId="smart_refresh",
@@ -48,7 +49,7 @@ _CATALOGUE = (
         description="Retrieve the detailed case record from an authorized provider source.",
         tokenPrice=5,
         billingUnit="per request",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="cause_list_search",
@@ -56,7 +57,7 @@ _CATALOGUE = (
         description="Search cause-list records using supported court and date filters.",
         tokenPrice=9,
         billingUnit="per request",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="cnr_cause_list_check",
@@ -64,7 +65,7 @@ _CATALOGUE = (
         description="Check cause-list appearances for one or more supplied CNRs.",
         tokenPrice=1,
         billingUnit="per CNR",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="order_download_pdf",
@@ -72,7 +73,7 @@ _CATALOGUE = (
         description="Retrieve an order PDF from an authorized source.",
         tokenPrice=11,
         billingUnit="per order",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="order_ai_summary",
@@ -80,7 +81,7 @@ _CATALOGUE = (
         description="Retrieve an order and produce a clearly labelled AI summary.",
         tokenPrice=22,
         billingUnit="per order",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="order_markdown_pdf",
@@ -88,7 +89,7 @@ _CATALOGUE = (
         description="Retrieve an order in supported text and PDF formats.",
         tokenPrice=15,
         billingUnit="per order",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="bulk_case_refresh",
@@ -96,7 +97,7 @@ _CATALOGUE = (
         description="Refresh multiple owned cases through the authorized gateway.",
         tokenPrice=0.5,
         billingUnit="per CNR",
-        available=False,
+        available=True,
     ),
     ServiceCatalogueItem(
         serviceId="legal_check",
