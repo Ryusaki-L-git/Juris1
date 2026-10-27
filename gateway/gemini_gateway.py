@@ -233,6 +233,12 @@ class GeminiGateway(JurisModelGateway):
             if function_declarations:
                 payload["tools"] = [{"functionDeclarations": function_declarations}]
 
+        # Bound each provider call so the pre-call Credits reservation has a
+        # finite, enforceable output-token ceiling.
+        payload["generationConfig"] = {
+            "maxOutputTokens": settings.ai_max_output_tokens,
+        }
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(
@@ -335,12 +341,32 @@ class GeminiGateway(JurisModelGateway):
                         )
 
             finish_reason = "tool_call" if tool_calls else "stop"
+            raw_usage = data.get("usageMetadata")
+            raw_usage = raw_usage if isinstance(raw_usage, dict) else {}
+            prompt_tokens = raw_usage.get("promptTokenCount", 0)
+            candidate_tokens = raw_usage.get("candidatesTokenCount", 0)
+            thinking_tokens = raw_usage.get("thoughtsTokenCount", 0)
+            def safe_count(value: Any) -> int:
+                return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+            usage_reported = any(
+                key in raw_usage
+                for key in ("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount")
+            )
+            usage = {
+                "input_tokens": safe_count(prompt_tokens),
+                "output_tokens": safe_count(candidate_tokens) + safe_count(thinking_tokens),
+                "usage_reported": usage_reported,
+            }
             return ModelResponse(
                 text="".join(text_chunks),
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
                 provider=self.provider_name,
-                raw_metadata={"session_id": request.session_id},
+                raw_metadata={
+                    "session_id": request.session_id,
+                    "model_name": self.model_name,
+                    "usage": usage,
+                },
             )
 
         except httpx.TimeoutException:
