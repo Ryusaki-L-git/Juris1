@@ -41,6 +41,11 @@ class ChatRequest(BaseModel):
     client_version: str | None = Field(default=None, description="LED client application version.")
     confirmed_action_ids: list[str] = Field(default_factory=list, description="Server-issued IDs for write actions explicitly approved by the user.")
     ai: AIConfigRequest | None = Field(default=None, description="Optional provider/model preference. Credentials are never carried here.")
+    billing_confirmation_token: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Single-use server-issued approval for the estimated JURIS AI Credit budget.",
+    )
 
 
 class ResponseStatus(str):
