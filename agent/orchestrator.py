@@ -22,12 +22,17 @@ SECURITY INVARIANTS:
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from agent.context_resolver import ContextResolver
 from core.authorized_access import AuthorizedLedAccess
 from core.action_confirmations import get_action_confirmation_store
 from core.config import settings
+from core.ai_pricing import estimate_reservation_minor_units, price_usage
+from core.credit_billing import CreditBillingService
+from core.finance_store import get_finance_repository
+from core.errors import InsufficientTokens
 from core.identity import RequestIdentity
 from core.led_access import LedDataAccess, get_led_data_access
 from core.permission_engine import LedPermissionEngine
@@ -138,9 +143,11 @@ class JurisOrchestrator:
         gateway: JurisModelGateway | None = None,
         permission_engine: PermissionEngine | None = None,
         data_access: LedDataAccess | None = None,
+        credit_billing: CreditBillingService | None = None,
     ) -> None:
         self._gateway = gateway or get_gateway()
         self._data_access = data_access or get_led_data_access()
+        self._credit_billing = credit_billing
         self._permission_engine = (
             permission_engine or LedPermissionEngine(self._data_access)
         )
@@ -213,6 +220,7 @@ class JurisOrchestrator:
         tools_executed_count = 0
         clarification_requested = False
         suggested_action = None
+        request_billing_id = identity.request_id.strip() or uuid.uuid4().hex
 
         # 5. Multi-round tool execution loop
         for round_idx in range(max_rounds):
@@ -229,7 +237,94 @@ class JurisOrchestrator:
                 },
             )
 
-            model_response: ModelResponse = await request_gateway.generate(model_request)
+            # Managed Gemini usage is billed in JURIS Credits. BYOK requests and
+            # non-Gemini providers are excluded; eCourts Case Tokens are untouched.
+            mode_value = getattr(getattr(request.ai, "mode", None), "value", getattr(request.ai, "mode", None))
+            bill_managed_gemini = (
+                settings.ai_usage_billing_enabled
+                and request_gateway.provider_name == "gemini"
+                and bool(getattr(request_gateway, "is_key_configured", True))
+                and str(mode_value or "managed").lower() != "byok"
+            )
+            reservation_reference: str | None = None
+            reserved_minor_units = 0
+            billed_model_name = (
+                str(getattr(request_gateway, "model_name", "") or "")
+                or str(getattr(request.ai, "model", "") or "")
+                or settings.effective_gemini_model
+            )
+            if bill_managed_gemini:
+                try:
+                    if self._credit_billing is None:
+                        self._credit_billing = CreditBillingService(get_finance_repository())
+                    reservation_reference = f"ai-chat:{request_billing_id}:{round_idx}"
+                    reserved_minor_units = estimate_reservation_minor_units(
+                        billed_model_name,
+                        len(model_request.model_dump_json()),
+                    )
+                    self._credit_billing.reserve(
+                        identity,
+                        reserved_minor_units,
+                        reference_id=reservation_reference,
+                    )
+                except InsufficientTokens:
+                    return ChatResponse(
+                        reply="You do not have enough JURIS Credits to safely run this AI request. Add Credits and try again.",
+                        status=ResponseStatus.UNAVAILABLE,
+                        session_id=request.session_id,
+                    )
+                except Exception as exc:
+                    logger.error("JURIS Credits reservation failed (%s).", type(exc).__name__)
+                    return ChatResponse(
+                        reply="JURIS could not safely reserve Credits, so the AI request was not sent. Please try again later.",
+                        status=ResponseStatus.UNAVAILABLE,
+                        session_id=request.session_id,
+                    )
+
+            try:
+                model_response: ModelResponse = await request_gateway.generate(model_request)
+            except Exception as exc:
+                if reservation_reference is not None and self._credit_billing is not None:
+                    try:
+                        self._credit_billing.settle(identity, reservation_reference, 0)
+                    except Exception as settle_exc:
+                        logger.error("Failed to release Credits after provider exception (%s).", type(settle_exc).__name__)
+                logger.error("Model gateway raised an unexpected exception (%s).", type(exc).__name__)
+                return ChatResponse(
+                    reply="The AI provider failed unexpectedly. Any unused Credit reservation was released where possible; please try again later.",
+                    status=ResponseStatus.UNAVAILABLE,
+                    session_id=request.session_id,
+                )
+
+            if reservation_reference is not None and self._credit_billing is not None:
+                usage = model_response.raw_metadata.get("usage")
+                usage_reported = isinstance(usage, dict) and usage.get("usage_reported") is True
+                try:
+                    if usage_reported:
+                        actual_charge = price_usage(
+                            billed_model_name,
+                            usage.get("input_tokens", 0),
+                            usage.get("output_tokens", 0),
+                        )
+                        actual_minor_units = actual_charge.credits_minor_units
+                    elif model_response.finish_reason == "error":
+                        actual_minor_units = 0
+                    else:
+                        # If the provider omits usage metadata, charge the full
+                        # conservative reservation rather than silently underbill.
+                        actual_minor_units = reserved_minor_units
+                    self._credit_billing.settle(
+                        identity,
+                        reservation_reference,
+                        actual_minor_units,
+                    )
+                except Exception as exc:
+                    logger.error("JURIS Credits settlement failed (%s).", type(exc).__name__)
+                    return ChatResponse(
+                        reply="JURIS could not safely reconcile the Credits for this response. The response was withheld to protect your balance; please contact support if the reservation remains visible.",
+                        status=ResponseStatus.UNAVAILABLE,
+                        session_id=request.session_id,
+                    )
 
             if model_response.finish_reason == "error":
                 return ChatResponse(

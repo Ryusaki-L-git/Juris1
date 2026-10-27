@@ -65,18 +65,27 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
                 raise ConfigurationError("Stored case-token balance is invalid.")
             return legacy * 100
 
+        # Existing JURIS balances are whole Credits. New balances use canonical
+        # hundredths so usage charges can be as small as 0.01 Credit.
+        if "balanceMinorUnits" in data:
+            value = data.get("balanceMinorUnits")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ConfigurationError("Stored JURIS Credit balance is invalid.")
+            return value
         balance = data.get("balance", 0)
         if isinstance(balance, bool) or not isinstance(balance, int) or balance < 0:
-            raise ConfigurationError("Stored JURIS-token balance is invalid.")
-        return balance
+            raise ConfigurationError("Stored JURIS Credit balance is invalid.")
+        return balance * 100
 
     @staticmethod
-    def _balance_in_tokens(stored_units: int, token_type: TokenType) -> int | float:
-        return stored_units / 100 if token_type is TokenType.CASE else stored_units
+    def _balance_in_tokens(stored_units: int, token_type: TokenType) -> float:
+        # Both currencies use hundredths internally; legacy whole-unit balances
+        # are normalized by _stored_balance_units before this conversion.
+        return stored_units / 100
 
     @staticmethod
     def _amount_in_storage_units(amount: int, token_type: TokenType) -> int:
-        return amount * 100 if token_type is TokenType.CASE else amount
+        return amount * 100
 
     @staticmethod
     def _account_balance_fields(
@@ -92,9 +101,177 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
             }
         return {
             "tokenType": token_type.value,
-            "balance": balance_units,
+            "balance": balance_units / 100,
+            "balanceMinorUnits": balance_units,
+            "balanceUnit": "hundredths",
             "updatedAt": updated_at,
         }
+
+    def reserve_credits(
+        self,
+        user_id: str,
+        amount_minor_units: int,
+        reason: str,
+        reference_id: str,
+    ) -> TokenLedgerEntry:
+        """Atomically reserve JURIS Credits before a managed Gemini call."""
+        if isinstance(amount_minor_units, bool) or not isinstance(amount_minor_units, int) or amount_minor_units < 1:
+            raise ValueError("Credit reservation must be at least 0.01 Credit.")
+        clean_user = user_id.strip()
+        clean_reason = reason.strip()
+        clean_reference = reference_id.strip()
+        if not clean_user or not clean_reason or not clean_reference:
+            raise ValueError("Credit reservation requires user, reason, and reference.")
+        transaction_id = hashlib.sha256(
+            f"{TokenType.JURIS.value}:{clean_reference}".encode("utf-8")
+        ).hexdigest()
+        account_ref = self._balance_ref(clean_user, TokenType.JURIS)
+        ledger_ref = self._ledger_collection(clean_user).document(transaction_id)
+        transaction = self._client.transaction(max_attempts=5)
+
+        @firestore.transactional
+        def reserve_in_transaction(txn: firestore.Transaction) -> TokenLedgerEntry:
+            prior_snapshot = ledger_ref.get(transaction=txn)
+            if prior_snapshot.exists:
+                prior_data = prior_snapshot.to_dict() or {}
+                prior = self._ledger_entry(prior_data)
+                if (
+                    prior.user_id != clean_user
+                    or prior.token_type is not TokenType.JURIS
+                    or prior.direction != "debit"
+                    or prior.reason != clean_reason
+                    or prior.reference_id != clean_reference
+                    or round(prior.amount * 100) != amount_minor_units
+                ):
+                    raise TokenOperationConflict()
+                return prior
+
+            account_snapshot = account_ref.get(transaction=txn)
+            account_data = account_snapshot.to_dict() or {}
+            available_units = self._stored_balance_units(account_data, TokenType.JURIS)
+            if amount_minor_units > available_units:
+                raise InsufficientTokens(amount_minor_units / 100, available_units / 100)
+
+            balance_after_units = available_units - amount_minor_units
+            created_at = datetime.now(timezone.utc)
+            entry = TokenLedgerEntry(
+                transaction_id=transaction_id,
+                user_id=clean_user,
+                actor_user_id=clean_user,
+                token_type=TokenType.JURIS,
+                amount=amount_minor_units / 100,
+                direction="debit",
+                reason=clean_reason,
+                reference_id=clean_reference,
+                created_at=created_at,
+                balance_after=balance_after_units / 100,
+            )
+            txn.set(
+                account_ref,
+                self._account_balance_fields(balance_after_units, TokenType.JURIS, created_at),
+                merge=True,
+            )
+            txn.create(ledger_ref, self._ledger_document(entry))
+            return entry
+
+        return reserve_in_transaction(transaction)
+
+    def settle_credits(
+        self,
+        user_id: str,
+        reservation_reference: str,
+        actual_minor_units: int,
+    ) -> float:
+        """Settle a prior reservation to actual usage and refund the unused hold atomically."""
+        if isinstance(actual_minor_units, bool) or not isinstance(actual_minor_units, int) or actual_minor_units < 0:
+            raise ValueError("Actual Credit charge must be non-negative minor units.")
+        clean_user = user_id.strip()
+        clean_reference = reservation_reference.strip()
+        if not clean_user or not clean_reference:
+            raise ValueError("Credit settlement requires user and reservation reference.")
+
+        reservation_id = hashlib.sha256(
+            f"{TokenType.JURIS.value}:{clean_reference}".encode("utf-8")
+        ).hexdigest()
+        reservation_ref = self._ledger_collection(clean_user).document(reservation_id)
+        settlement_id = hashlib.sha256(
+            f"{clean_user}:{clean_reference}:settlement".encode("utf-8")
+        ).hexdigest()
+        settlement_ref = self._client.collection("_server_ai_usage_settlements").document(settlement_id)
+        account_ref = self._balance_ref(clean_user, TokenType.JURIS)
+        transaction = self._client.transaction(max_attempts=5)
+
+        @firestore.transactional
+        def settle_in_transaction(txn: firestore.Transaction) -> float:
+            prior_settlement = settlement_ref.get(transaction=txn)
+            if prior_settlement.exists:
+                prior_data = prior_settlement.to_dict() or {}
+                if prior_data.get("actualMinorUnits") != actual_minor_units:
+                    raise TokenOperationConflict()
+                return float(prior_data.get("balanceAfter", 0.0))
+
+            reservation_snapshot = reservation_ref.get(transaction=txn)
+            if not reservation_snapshot.exists:
+                raise TokenOperationConflict()
+            reservation_data = reservation_snapshot.to_dict() or {}
+            reservation = self._ledger_entry(reservation_data)
+            if (
+                reservation.user_id != clean_user
+                or reservation.token_type is not TokenType.JURIS
+                or reservation.direction != "debit"
+                or reservation.reference_id != clean_reference
+            ):
+                raise TokenOperationConflict()
+
+            account_snapshot = account_ref.get(transaction=txn)
+            account_data = account_snapshot.to_dict() or {}
+            current_units = self._stored_balance_units(account_data, TokenType.JURIS)
+            reserved_minor_units = reservation_data.get("amountMinorUnits")
+            if not isinstance(reserved_minor_units, int) or isinstance(reserved_minor_units, bool):
+                reserved_minor_units = round(reservation.amount * 100)
+            delta = reserved_minor_units - actual_minor_units
+            balance_after_units = current_units + delta
+            if balance_after_units < 0:
+                raise InsufficientTokens(-delta / 100, current_units / 100)
+
+            created_at = datetime.now(timezone.utc)
+            if delta:
+                txn.set(
+                    account_ref,
+                    self._account_balance_fields(balance_after_units, TokenType.JURIS, created_at),
+                    merge=True,
+                )
+
+            if actual_minor_units == 0:
+                # Failed provider calls are fully released and do not appear as a charge.
+                txn.delete(reservation_ref)
+            else:
+                settled_entry = TokenLedgerEntry(
+                    transaction_id=reservation.transaction_id,
+                    user_id=clean_user,
+                    actor_user_id=clean_user,
+                    token_type=TokenType.JURIS,
+                    amount=actual_minor_units / 100,
+                    direction="debit",
+                    reason="JURIS AI usage",
+                    reference_id=clean_reference,
+                    created_at=reservation.created_at,
+                    balance_after=balance_after_units / 100,
+                )
+                txn.set(reservation_ref, self._ledger_document(settled_entry))
+
+            txn.create(settlement_ref, {
+                "userId": clean_user,
+                "reservationReference": clean_reference,
+                "reservedMinorUnits": reserved_minor_units,
+                "actualMinorUnits": actual_minor_units,
+                "balanceAfter": balance_after_units / 100,
+                "balanceAfterMinorUnits": balance_after_units,
+                "createdAt": created_at,
+            })
+            return balance_after_units / 100
+
+        return settle_in_transaction(transaction)
 
     def consume_tokens(
         self,
@@ -286,9 +463,8 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
             "createdAt": entry.created_at,
             "balanceAfter": entry.balance_after,
         }
-        if entry.token_type is TokenType.CASE:
-            document["amountMinorUnits"] = round(entry.amount * 100)
-            document["balanceAfterMinorUnits"] = round(entry.balance_after * 100)
+        document["amountMinorUnits"] = round(entry.amount * 100)
+        document["balanceAfterMinorUnits"] = round(entry.balance_after * 100)
         return document
 
     @staticmethod
@@ -298,12 +474,12 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         balance_minor = data.get("balanceAfterMinorUnits")
         amount = (
             amount_minor / 100
-            if token_type is TokenType.CASE and isinstance(amount_minor, int)
+            if isinstance(amount_minor, int) and not isinstance(amount_minor, bool)
             else data["amount"]
         )
         balance_after = (
             balance_minor / 100
-            if token_type is TokenType.CASE and isinstance(balance_minor, int)
+            if isinstance(balance_minor, int) and not isinstance(balance_minor, bool)
             else data["balanceAfter"]
         )
         return TokenLedgerEntry(
