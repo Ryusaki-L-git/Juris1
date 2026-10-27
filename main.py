@@ -17,6 +17,7 @@ from api.chat import router as chat_router
 from api.ai import router as ai_router
 from api.finance import router as finance_router
 from api.monitoring import router as monitoring_router
+from api.services_catalogue import router as services_catalogue_router
 from core.config import settings
 from core.errors import JurisError
 from monitoring.scheduler import start_scheduler, stop_scheduler
@@ -54,6 +55,7 @@ app.include_router(chat_router, prefix=settings.api_prefix)
 app.include_router(ai_router, prefix=settings.api_prefix)
 app.include_router(finance_router, prefix=settings.api_prefix)
 app.include_router(monitoring_router, prefix=settings.api_prefix)
+app.include_router(services_catalogue_router, prefix=settings.api_prefix)
 
 
 
