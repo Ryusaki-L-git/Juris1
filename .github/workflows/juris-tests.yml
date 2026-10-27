@@ -39,6 +39,6 @@ jobs:
         with:
           enable-cache: true
       - name: Install project and test dependencies
-        run: uv sync --group dev
+        run: uv sync --python 3.12 --group dev
       - name: Run full JURIS test suite
-        run: uv run pytest -q
+        run: uv run --python 3.12 pytest -q
