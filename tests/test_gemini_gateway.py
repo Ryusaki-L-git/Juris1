@@ -33,11 +33,33 @@ from gateway.gemini_gateway import (
     MISSING_KEY_MESSAGE,
     PLACEHOLDER_KEY,
     convert_tool_definitions,
+    extract_usage_metadata,
     is_configured_api_key,
 )
 
 
 class GeminiGatewayUnitTests(unittest.TestCase):
+    def test_usage_metadata_includes_input_output_and_thinking_tokens(self) -> None:
+        usage = extract_usage_metadata({
+            "usageMetadata": {
+                "promptTokenCount": 120,
+                "candidatesTokenCount": 30,
+                "thoughtsTokenCount": 5,
+            }
+        })
+        self.assertEqual(usage, {
+            "input_tokens": 120,
+            "output_tokens": 35,
+            "usage_reported": True,
+        })
+
+    def test_incomplete_usage_metadata_falls_back_to_reservation(self) -> None:
+        usage = extract_usage_metadata({
+            "usageMetadata": {"promptTokenCount": 120}
+        })
+        self.assertEqual(usage["input_tokens"], 120)
+        self.assertEqual(usage["usage_reported"], False)
+
     def test_default_model_is_gemini_3_8_flash(self) -> None:
         gateway = GeminiGateway()
         self.assertEqual(gateway.model_name, "gemini-3.8-flash")
