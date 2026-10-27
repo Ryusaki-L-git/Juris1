@@ -325,11 +325,13 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
         ).hexdigest()
         account_ref = self._balance_ref(clean_user, TokenType.JURIS)
         ledger_ref = self._ledger_collection(clean_user).document(transaction_id)
+        marker_ref = self._ai_reservation_marker_ref(clean_user, clean_reference)
         transaction = self._client.transaction(max_attempts=5)
 
         @firestore.transactional
         def reserve_in_transaction(txn: firestore.Transaction) -> TokenLedgerEntry:
             prior_snapshot = ledger_ref.get(transaction=txn)
+            marker_snapshot = marker_ref.get(transaction=txn)
             if prior_snapshot.exists:
                 prior_data = prior_snapshot.to_dict() or {}
                 prior = self._ledger_entry(prior_data)
@@ -343,6 +345,11 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
                 ):
                     raise TokenOperationConflict()
                 return prior
+
+            if marker_snapshot.exists:
+                marker_data = marker_snapshot.to_dict() or {}
+                if marker_data.get("userId") != clean_user or marker_data.get("referenceId") != clean_reference or marker_data.get("source") not in {None, "personal"}:
+                    raise TokenOperationConflict()
 
             account_snapshot = account_ref.get(transaction=txn)
             account_data = account_snapshot.to_dict() or {}
@@ -370,6 +377,14 @@ class FirestoreFinanceRepository(EntitlementRepository, TokenRepository):
                 merge=True,
             )
             txn.create(ledger_ref, self._ledger_document(entry))
+            txn.set(marker_ref, {
+                "userId": clean_user,
+                "teamId": None,
+                "source": "personal",
+                "referenceId": clean_reference,
+                "amountMinorUnits": amount_minor_units,
+                "createdAt": created_at,
+            })
             return entry
 
         return reserve_in_transaction(transaction)
