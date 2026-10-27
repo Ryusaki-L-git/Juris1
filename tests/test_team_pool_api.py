@@ -4,14 +4,16 @@ from fastapi.testclient import TestClient
 
 import api.team_pools as team_pools
 from api.deps import get_request_identity
+from core.config import settings
 from core.identity import JurisUser, RequestIdentity
 from main import app
-from core.config import settings
+from tests.test_team_credit_pools import FakeClient, _seed
 
 _PREFIX = settings.api_prefix.rstrip('/')
+
+
 def _api(path: str) -> str:
     return f"{_PREFIX}{path}"
-from tests.test_team_credit_pools import FakeClient, _seed
 
 
 def _identity(uid="uid-a"):
@@ -41,7 +43,7 @@ def test_preferences_read_and_save_server_side(monkeypatch):
         assert before.json() == {"usageDeductionPriority": "personal_first", "preferredTeamId": "team-a"}
 
         saved = http.put(
-            "/v1/billing/preferences",
+            _api("/billing/preferences"),
             json={"usageDeductionPriority": "team_first", "preferredTeamId": "team-a"},
         )
         assert saved.status_code == 200
