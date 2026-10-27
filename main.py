@@ -18,6 +18,7 @@ from api.ai import router as ai_router
 from api.finance import router as finance_router
 from api.monitoring import router as monitoring_router
 from api.services_catalogue import router as services_catalogue_router
+from api.team_pools import router as team_pools_router
 from core.config import settings
 from core.errors import JurisError
 from monitoring.scheduler import start_scheduler, stop_scheduler
@@ -56,6 +57,7 @@ app.include_router(ai_router, prefix=settings.api_prefix)
 app.include_router(finance_router, prefix=settings.api_prefix)
 app.include_router(monitoring_router, prefix=settings.api_prefix)
 app.include_router(services_catalogue_router, prefix=settings.api_prefix)
+app.include_router(team_pools_router, prefix=settings.api_prefix)
 
 
 
