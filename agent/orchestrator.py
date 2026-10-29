@@ -30,6 +30,7 @@ from core.authorized_access import AuthorizedLedAccess
 from core.action_confirmations import get_action_confirmation_store
 from core.config import settings
 from core.ai_pricing import estimate_reservation_minor_units, price_usage
+from core.ai_usage_confirmations import get_ai_usage_confirmation_store
 from core.credit_billing import CreditBillingService
 from core.finance_store import get_finance_repository
 from core.errors import InsufficientTokens
@@ -221,6 +222,17 @@ class JurisOrchestrator:
         clarification_requested = False
         suggested_action = None
         request_billing_id = identity.request_id.strip() or uuid.uuid4().hex
+        # Bind approval to the exact message, supplied context, and pending write
+        # confirmations so a quote cannot be reused with a modified request.
+        quote_binding_message = (
+            request.message
+            + "\\0"
+            + request.context.model_dump_json()
+            + "\\0"
+            + "\\0".join(sorted(request.confirmed_action_ids))
+        )
+        approved_budget_minor_units: int | None = None
+        spent_minor_units = 0
 
         # 5. Multi-round tool execution loop
         for round_idx in range(max_rounds):
@@ -248,6 +260,7 @@ class JurisOrchestrator:
             )
             reservation_reference: str | None = None
             reserved_minor_units = 0
+            budget_overrun = False
             billed_model_name = (
                 str(getattr(request_gateway, "model_name", "") or "")
                 or str(getattr(request.ai, "model", "") or "")
@@ -255,13 +268,87 @@ class JurisOrchestrator:
             )
             if bill_managed_gemini:
                 try:
+                    if round_idx == 0:
+                        quote_store = get_ai_usage_confirmation_store()
+                        if not request.billing_confirmation_token:
+                            per_call_estimate = estimate_reservation_minor_units(
+                                billed_model_name,
+                                len(model_request.model_dump_json()),
+                            )
+                            max_budget = per_call_estimate * max(1, max_rounds)
+                            quote_token = await quote_store.issue(
+                                identity.user.user_id,
+                                request.session_id,
+                                quote_binding_message,
+                                billed_model_name,
+                                max_budget,
+                            )
+                            max_credits = max_budget / 100
+                            return ChatResponse(
+                                reply=(
+                                    f"This request is estimated to use up to {max_credits:.2f} JURIS Credits "
+                                    f"({max(1, max_rounds)} bounded AI steps). Actual usage is charged at the "
+                                    "published rate card, and charges will not exceed the approved budget. "
+                                    "Continue?"
+                                ),
+                                status=ResponseStatus.CONFIRMATION_REQUIRED,
+                                session_id=request.session_id,
+                                suggested_action={
+                                    "type": "confirm_ai_usage",
+                                    "quote_token": quote_token,
+                                    "estimated_credits": max_credits,
+                                    "max_credits": max_credits,
+                                },
+                                billing_quote={
+                                    "estimated_credits": max_credits,
+                                    "max_credits": max_credits,
+                                    "expires_in_seconds": 300,
+                                },
+                            )
+                        approved_budget_minor_units = await quote_store.consume(
+                            request.billing_confirmation_token,
+                            identity.user.user_id,
+                            request.session_id,
+                            quote_binding_message,
+                            billed_model_name,
+                        )
+                        if approved_budget_minor_units is None:
+                            return ChatResponse(
+                                reply=(
+                                    "That JURIS Credit estimate has expired or does not match this request. "
+                                    "Please send the message again to receive a fresh estimate."
+                                ),
+                                status=ResponseStatus.UNAVAILABLE,
+                                session_id=request.session_id,
+                            )
+                    if approved_budget_minor_units is None:
+                        return ChatResponse(
+                            reply="JURIS could not verify the approved Credit budget, so no further AI work was started.",
+                            status=ResponseStatus.UNAVAILABLE,
+                            session_id=request.session_id,
+                        )
+                    remaining_budget = approved_budget_minor_units - spent_minor_units
+                    if remaining_budget <= 0:
+                        return ChatResponse(
+                            reply=(
+                                "The approved JURIS Credit budget has been reached. No further AI calls were made. "
+                                "Send a follow-up message to receive a fresh estimate before continuing."
+                            ),
+                            status=ResponseStatus.UNAVAILABLE,
+                            session_id=request.session_id,
+                        )
                     if self._credit_billing is None:
                         self._credit_billing = CreditBillingService(get_finance_repository())
                     reservation_reference = f"ai-chat:{request_billing_id}:{round_idx}"
-                    reserved_minor_units = estimate_reservation_minor_units(
+                    per_call_estimate = estimate_reservation_minor_units(
                         billed_model_name,
                         len(model_request.model_dump_json()),
                     )
+                    # Reserve the full remaining user-approved budget for this
+                    # provider call. Settlement refunds the unused portion, so
+                    # a real usage charge may exceed the per-call estimate while
+                    # still remaining inside the explicitly approved total cap.
+                    reserved_minor_units = remaining_budget
                     self._credit_billing.reserve(
                         identity,
                         reserved_minor_units,
@@ -310,14 +397,18 @@ class JurisOrchestrator:
                     elif model_response.finish_reason == "error":
                         actual_minor_units = 0
                     else:
-                        # If the provider omits usage metadata, charge the full
-                        # conservative reservation rather than silently underbill.
-                        actual_minor_units = reserved_minor_units
+                        # If provider usage is unavailable, charge the conservative
+                        # per-call estimate, not the entire multi-round budget hold.
+                        actual_minor_units = min(per_call_estimate, reserved_minor_units)
+                    # Never charge more than the user-approved remaining budget.
+                    budget_overrun = actual_minor_units > reserved_minor_units
+                    actual_minor_units = min(actual_minor_units, reserved_minor_units)
                     self._credit_billing.settle(
                         identity,
                         reservation_reference,
                         actual_minor_units,
                     )
+                    spent_minor_units += actual_minor_units
                 except Exception as exc:
                     logger.error("JURIS Credits settlement failed (%s).", type(exc).__name__)
                     return ChatResponse(
@@ -342,8 +433,25 @@ class JurisOrchestrator:
                     ),
                 )
 
+            # If provider usage would exceed the user's approved budget, stop before
+            # executing any requested tool or making another model call.
+            if bill_managed_gemini and 'budget_overrun' in locals() and budget_overrun and model_response.tool_calls:
+                return ChatResponse(
+                    reply=(
+                        "The model reached the approved JURIS Credit budget. I paused before executing "
+                        "the requested next step. Send a follow-up to receive a fresh estimate before continuing."
+                    ),
+                    status=ResponseStatus.UNAVAILABLE,
+                    session_id=request.session_id,
+                )
+
             # If no tool calls requested, we have the final model response
             if not model_response.tool_calls:
+                final_reply = model_response.text
+                if bill_managed_gemini and budget_overrun:
+                    final_reply += (
+                        "\n\nThe approved Credit limit was reached. No additional AI calls were made."
+                    )
                 debug_payload = None
                 if settings.debug:
                     debug_payload = {
@@ -361,7 +469,7 @@ class JurisOrchestrator:
                 )
 
                 return ChatResponse(
-                    reply=model_response.text,
+                    reply=final_reply,
                     status=status_code,
                     session_id=request.session_id,
                     suggested_action=suggested_action,
