@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     )
 
     # ── Application ──────────────────────────────────────────────────────────
-    # Fail closed if hosting omits JURIS_ENV. Local development must explicitly set JURIS_ENV=development.\n    env: Literal["development", "staging", "production"] = "production"
+    # Fail closed if hosting omits JURIS_ENV. Local development must explicitly set JURIS_ENV=development.
+    env: Literal["development", "staging", "production"] = "production"
     version: str = "0.4.0"
     debug: bool = False
 
@@ -52,7 +53,8 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.allowed_origins_raw.split(",") if o.strip()]
 
     # ── Model Gateway ─────────────────────────────────────────────────────────
-    # Echo is a development/testing adapter, never the implicit production default.\n    gateway: Literal["echo", "gemini", "openai_compatible"] = "gemini"
+    # Echo is a development/testing adapter, never the implicit production default.
+    gateway: Literal["echo", "gemini", "openai_compatible"] = "gemini"
     # Expand Literal when real providers are wired: "gemini" | "openai" | ...
     # Provider API keys are read here but never logged or exposed via the API.
     gemini_api_key: str = ""
@@ -101,7 +103,8 @@ class Settings(BaseSettings):
     # stored in the user's Firestore case record. JURIS cannot call eCourts directly.
 
     # ── Firebase / Auth ───────────────────────────────────────────────────────
-    # Local dev tokens must be opted into explicitly; production defaults to Firebase verification.\n    auth_mode: Literal["firebase", "dev"] = "firebase"
+    # Local dev tokens must be opted into explicitly; production defaults to Firebase verification.
+    auth_mode: Literal["firebase", "dev"] = "firebase"
     # "firebase": verifies incoming JWT against Firebase Auth.
     # "dev": allows local dev tokens for testing without Firebase.
     # In production/staging, "dev" is strictly forbidden.
