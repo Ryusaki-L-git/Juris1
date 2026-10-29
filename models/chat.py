@@ -14,6 +14,7 @@ Design rules:
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,7 @@ class ChatRequest(BaseModel):
     context: RequestContext = Field(default_factory=RequestContext)
     client_version: str | None = Field(default=None, description="LED client application version.")
     confirmed_action_ids: list[str] = Field(default_factory=list, description="Server-issued IDs for write actions explicitly approved by the user.")
+    billing_source: Literal["personal", "team"] | None = Field(default=None, description="Explicit personal/team wallet choice for this request when the user selected ask-before-charge.")
     ai: AIConfigRequest | None = Field(default=None, description="Optional provider/model preference. Credentials are never carried here.")
     billing_confirmation_token: str | None = Field(
         default=None,
@@ -62,6 +64,7 @@ class ResponseStatus(str):
     UNAUTHENTICATED = "unauthenticated"
     UNAVAILABLE = "unavailable"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    BILLING_SOURCE_REQUIRED = "billing_source_required"
 
 
 class ChatResponse(BaseModel):

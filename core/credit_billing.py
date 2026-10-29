@@ -10,7 +10,8 @@ from core.tokens import TokenLedgerEntry
 
 class CreditBillingRepository(Protocol):
     def reserve_credits(
-        self, user_id: str, amount_minor_units: int, reason: str, reference_id: str
+        self, user_id: str, amount_minor_units: int, reason: str, reference_id: str,
+        *, billing_source: str | None = None,
     ) -> TokenLedgerEntry: ...
 
     def settle_credits(
@@ -30,13 +31,22 @@ class CreditBillingService:
         amount_minor_units: int,
         *,
         reference_id: str,
+        billing_source: str | None = None,
     ) -> TokenLedgerEntry:
         user = require_verified_user(identity)
+        if billing_source is None:
+            return self._repository.reserve_credits(
+                user.user_id,
+                amount_minor_units,
+                "JURIS AI usage reservation",
+                reference_id,
+            )
         return self._repository.reserve_credits(
             user.user_id,
             amount_minor_units,
             "JURIS AI usage reservation",
             reference_id,
+            billing_source=billing_source,
         )
 
     def settle(

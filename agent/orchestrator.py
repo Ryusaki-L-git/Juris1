@@ -32,7 +32,7 @@ from core.config import settings
 from core.ai_pricing import estimate_reservation_minor_units, price_usage
 from core.ai_usage_confirmations import get_ai_usage_confirmation_store
 from core.credit_billing import CreditBillingService
-from core.finance_store import get_finance_repository
+from core.finance_store import BillingSourceChoiceRequired, get_finance_repository
 from core.errors import InsufficientTokens
 from core.identity import RequestIdentity
 from core.led_access import LedDataAccess, get_led_data_access
@@ -353,10 +353,22 @@ class JurisOrchestrator:
                         identity,
                         reserved_minor_units,
                         reference_id=reservation_reference,
+                        billing_source=request.billing_source,
+                    )
+                except BillingSourceChoiceRequired:
+                    return ChatResponse(
+                        reply="Before continuing, choose whether this AI request should use your personal JURIS Credits or your team's allocated Credits.",
+                        status=ResponseStatus.BILLING_SOURCE_REQUIRED,
+                        session_id=request.session_id,
+                        suggested_action={
+                            "type": "choose_billing_source",
+                            "options": ["personal", "team"],
+                            "team_id": identity.user.team_id,
+                        },
                     )
                 except InsufficientTokens:
                     return ChatResponse(
-                        reply="You do not have enough JURIS Credits to safely run this AI request. Add Credits and try again.",
+                        reply="You do not have enough JURIS Credits in the selected billing source. Change the wallet priority or add Credits and try again.",
                         status=ResponseStatus.UNAVAILABLE,
                         session_id=request.session_id,
                     )
